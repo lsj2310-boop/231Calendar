@@ -1,0 +1,278 @@
+// 231 Calendar
+// Modified 2026-11-16 for 231 Calendar: branding, Korean UI and separate user data.
+// Copyright (C) 2026 Lee Sang Il (231 Calendar modifications)
+// Copyright (C) 2026 Mahdi Kazemiesfahani
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+using System.Runtime.InteropServices;
+
+namespace Calendar231;
+
+internal static class NativeMethods
+{
+    public const int GWL_EXSTYLE = -20;
+
+    public const long WS_EX_TRANSPARENT = 0x00000020;  // mouse passes through
+    public const long WS_EX_NOACTIVATE = 0x08000000;   // never steals keyboard focus
+
+    public const int WM_WINDOWPOSCHANGING = 0x0046;
+    public const uint SWP_NOZORDER = 0x0004;
+    public const uint SWP_NOSIZE_NOMOVE_NOACTIVATE = 0x0013;
+
+    public static readonly IntPtr HWND_BOTTOM = new(1);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct WINDOWPOS
+    {
+        public IntPtr hwnd;
+        public IntPtr hwndInsertAfter;
+        public int x;
+        public int y;
+        public int cx;
+        public int cy;
+        public uint flags;
+    }
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+    public static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
+    public static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+        int x, int y, int cx, int cy, uint uFlags);
+
+    public static void AddExStyle(IntPtr hwnd, long style)
+    {
+        long ex = GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64();
+        if ((ex & style) != style)
+            SetWindowLongPtr(hwnd, GWL_EXSTYLE, new IntPtr(ex | style));
+    }
+
+    public static void RemoveExStyle(IntPtr hwnd, long style)
+    {
+        long ex = GetWindowLongPtr(hwnd, GWL_EXSTYLE).ToInt64();
+        if ((ex & style) != 0)
+            SetWindowLongPtr(hwnd, GWL_EXSTYLE, new IntPtr(ex & ~style));
+    }
+
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    public static extern bool EnumChildWindows(IntPtr hwndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    /// <summary>
+    /// Input hit-testing descends into child HWNDs. WebView2 hosts its input in its own
+    /// child window tree (Chrome_WidgetWin_*), so unlike the Chrome PWA case (top-level
+    /// handles all input), WS_EX_TRANSPARENT must be on EVERY window in the hit path.
+    /// Windows that gain the style are recorded in <paramref name="applied"/> — some of
+    /// Chrome's windows (e.g. the Intermediate D3D compositing surface) carry
+    /// WS_EX_TRANSPARENT natively, and stripping it from them blanks the rendering.
+    /// </summary>
+    public static void EnableClickThrough(IntPtr root, ISet<IntPtr> applied)
+    {
+        Apply(root);
+        EnumChildWindows(root, (h, _) => { Apply(h); return true; }, IntPtr.Zero);
+
+        void Apply(IntPtr h)
+        {
+            long ex = GetWindowLongPtr(h, GWL_EXSTYLE).ToInt64();
+            if ((ex & WS_EX_TRANSPARENT) == 0)
+            {
+                SetWindowLongPtr(h, GWL_EXSTYLE, new IntPtr(ex | WS_EX_TRANSPARENT));
+                applied.Add(h);
+            }
+        }
+    }
+
+    /// <summary>Remove WS_EX_TRANSPARENT only from the windows EnableClickThrough added it to.</summary>
+    public static void DisableClickThrough(ISet<IntPtr> applied)
+    {
+        foreach (var h in applied)
+            RemoveExStyle(h, WS_EX_TRANSPARENT);  // destroyed handles fail silently, which is fine
+        applied.Clear();
+    }
+
+    public static void SendToBottom(IntPtr hwnd) =>
+        SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOSIZE_NOMOVE_NOACTIVATE);
+
+    // ---- live-wallpaper mode: reparent the widget behind the desktop icons ----
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetParent(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool ScreenToClient(IntPtr hWnd, ref Point point);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassNameW(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
+
+    /// <summary>Is this handle a live WorkerW? Used to detect when the shell recreated it and orphaned us.</summary>
+    public static bool IsWorkerW(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero || !IsWindow(hwnd))
+            return false;
+        var sb = new System.Text.StringBuilder(16);
+        GetClassNameW(hwnd, sb, sb.Capacity);
+        return sb.ToString() == "WorkerW";
+    }
+
+    public const int WM_SETREDRAW = 0x000B;
+    public const int WM_DISPLAYCHANGE = 0x007E;
+
+    /// <summary>Suspend/resume painting so a multi-step reparent+DPI transition doesn't flicker.</summary>
+    public static void SetRedraw(IntPtr hwnd, bool on) =>
+        SendMessage(hwnd, WM_SETREDRAW, new IntPtr(on ? 1 : 0), IntPtr.Zero);
+
+    [DllImport("user32.dll")]
+    private static extern bool RedrawWindow(IntPtr hWnd, IntPtr lprcUpdate, IntPtr hrgnUpdate, uint flags);
+
+    /// <summary>Force a full repaint of the window and all children after resuming redraw.</summary>
+    public static void RepaintAll(IntPtr hwnd) =>
+        RedrawWindow(hwnd, IntPtr.Zero, IntPtr.Zero, 0x1 | 0x4 | 0x80 | 0x100 | 0x400);  // INVALIDATE|ERASE|ALLCHILDREN|UPDATENOW|FRAME
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr FindWindowW(string className, string? windowName);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr FindWindowExW(IntPtr parent, IntPtr childAfter, string className, string? windowName);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr SendMessageTimeoutW(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam,
+        uint flags, uint timeout, out IntPtr result);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    /// <summary>
+    /// The Wallpaper-Engine trick: message 0x052C makes Progman split off a WorkerW
+    /// window that sits behind the desktop icons (SHELLDLL_DefView) but above the
+    /// wallpaper. A window reparented into it renders under the icons. Classic layout:
+    /// the WorkerW is the sibling AFTER the window hosting SHELLDLL_DefView; on
+    /// Win11 24H2 it is a CHILD of Progman instead. Returns IntPtr.Zero when the
+    /// shell doesn't cooperate — callers must degrade to normal bottom-pinning.
+    /// </summary>
+    public static IntPtr FindDesktopWorkerW()
+    {
+        IntPtr progman = FindWindowW("Progman", null);
+        if (progman == IntPtr.Zero)
+            return IntPtr.Zero;
+        SendMessageTimeoutW(progman, 0x052C, new IntPtr(0xD), new IntPtr(1), 0, 1000, out _);
+
+        // explorer creates the WorkerW asynchronously after the message; poll briefly
+        for (int attempt = 0; attempt < 20; attempt++)
+        {
+            IntPtr workerW = IntPtr.Zero;
+            EnumWindows((top, _) =>
+            {
+                if (FindWindowExW(top, IntPtr.Zero, "SHELLDLL_DefView", null) != IntPtr.Zero)
+                {
+                    IntPtr sibling = FindWindowExW(IntPtr.Zero, top, "WorkerW", null);
+                    if (sibling != IntPtr.Zero)
+                        workerW = sibling;
+                }
+                return true;
+            }, IntPtr.Zero);
+
+            if (workerW == IntPtr.Zero)
+                workerW = FindWindowExW(progman, IntPtr.Zero, "WorkerW", null);  // Win11 24H2 layout
+            if (workerW != IntPtr.Zero)
+                return workerW;
+            Thread.Sleep(50);
+        }
+        return IntPtr.Zero;
+    }
+
+    // custom title bar: window dragging + resize hit-test codes
+    [DllImport("user32.dll")]
+    public static extern bool ReleaseCapture();
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    public const int WM_NCHITTEST = 0x84;
+    public const int WM_NCCALCSIZE = 0x83;
+    public const int WM_GETMINMAXINFO = 0x24;
+    public const int HTCLIENT = 1;
+    public const uint SWP_NOZORDER_NOACTIVATE = 0x0014;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
+    [DllImport("user32.dll")]
+    public static extern uint GetDpiForWindow(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+
+    [DllImport("shcore.dll")]
+    private static extern int GetDpiForMonitor(IntPtr hmonitor, int dpiType, out uint dpiX, out uint dpiY);
+
+    /// <summary>
+    /// DPI of the monitor the window is (mostly) on. Unlike GetDpiForWindow this is the
+    /// physical monitor's scale even while we're reparented into the WorkerW, whose DPI
+    /// context is the primary monitor's.
+    /// </summary>
+    public static int MonitorDpi(IntPtr hwnd)
+    {
+        IntPtr monitor = MonitorFromWindow(hwnd, 2 /*MONITOR_DEFAULTTONEAREST*/);
+        return GetDpiForMonitor(monitor, 0 /*MDT_EFFECTIVE_DPI*/, out uint dpi, out _) == 0 ? (int)dpi : 96;
+    }
+
+    /// <summary>
+    /// True if the window is maximized, read from Win32 rather than WinForms' WindowState —
+    /// which can still report Normal mid-transition, making WM_NCCALCSIZE skip the frame
+    /// inset and let the title bar slide off the top of the screen.
+    /// </summary>
+    [DllImport("user32.dll")]
+    public static extern bool IsZoomed(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetricsForDpi(int index, uint dpi);
+
+    /// <summary>
+    /// Thickness of the invisible resize frame at this window's DPI. Windows positions a
+    /// maximized WS_THICKFRAME window so this frame hangs OUTSIDE the monitor; the client
+    /// rect must be inset by it in WM_NCCALCSIZE or the content edges land off-screen.
+    /// </summary>
+    public static (int X, int Y) MaximizedFrameThickness(IntPtr hwnd)
+    {
+        uint dpi = GetDpiForWindow(hwnd);
+        int pad = GetSystemMetricsForDpi(92 /*SM_CXPADDEDBORDER*/, dpi);
+        return (GetSystemMetricsForDpi(32 /*SM_CXSIZEFRAME*/, dpi) + pad,
+                GetSystemMetricsForDpi(33 /*SM_CYSIZEFRAME*/, dpi) + pad);
+    }
+
+    // window styles that enable native behaviors (Aero Snap, drag-to-top maximize)
+    // on an otherwise borderless window; the visual frame is removed via WM_NCCALCSIZE
+    public const int WS_CAPTION = 0x00C00000;
+    public const int WS_THICKFRAME = 0x00040000;
+    public const int WS_MAXIMIZEBOX = 0x00010000;
+    public const int HTLEFT = 10, HTRIGHT = 11, HTTOP = 12, HTTOPLEFT = 13, HTTOPRIGHT = 14;
+    public const int HTBOTTOM = 15, HTBOTTOMLEFT = 16, HTBOTTOMRIGHT = 17;
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+
+    // Win11 niceties; both calls fail harmlessly (square corners / light titlebar) on older builds
+    public static void ApplyRoundedCorners(IntPtr hwnd)
+    {
+        int pref = 2;  // DWMWCP_ROUND
+        DwmSetWindowAttribute(hwnd, 33, ref pref, sizeof(int));  // DWMWA_WINDOW_CORNER_PREFERENCE
+    }
+
+    public static void ApplyDarkTitleBar(IntPtr hwnd)
+    {
+        int on = 1;
+        DwmSetWindowAttribute(hwnd, 20, ref on, sizeof(int));  // DWMWA_USE_IMMERSIVE_DARK_MODE
+        int border = 0x00101010; // COLORREF #101010; Win11 outer resize border
+        DwmSetWindowAttribute(hwnd, 34, ref border, sizeof(int)); // DWMWA_BORDER_COLOR; ignored on Win10
+    }
+}

@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Version>1.0.1</Version>
+    <Copyright>Copyright (C) 2026 Lee Sang Il (231 Calendar modifications); original code Copyright (C) 2026 Mahdi Kazemiesfahani. AGPL-3.0-or-later.</Copyright>
+    <Product>231 Calendar</Product>
+    <Description>Transparent Google Calendar desktop widget - 231 Calendar</Description>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Calendar231</RootNamespace>
+    <AssemblyName>231Calendar</AssemblyName>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+    <!-- Windows 8+ compatibility: layered child windows (transparency behind desktop icons) -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- precompile to native code on publish: much faster cold start at login -->
+    <PublishReadyToRun>false</PublishReadyToRun>
+    <TieredCompilationQuickJitForLoops>true</TieredCompilationQuickJitForLoops>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2592.51" />
+  </ItemGroup>
+
+</Project>
